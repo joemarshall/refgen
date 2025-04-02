@@ -1,11 +1,11 @@
 from docxtpl import DocxTemplate
 import datetime
 import re
-import comtypes
-import comtypes.client
 from pathlib import Path
 import os
-
+import argparse
+import sys
+import docx
 import asciimatics
 from asciimatics.widgets import (
     Frame,
@@ -19,6 +19,7 @@ from asciimatics.widgets import (
     DatePicker,
     DropdownList,
     MultiColumnListBox,
+    PopUpDialog
 )
 from asciimatics.scene import Scene
 from asciimatics.screen import Screen
@@ -180,42 +181,34 @@ class RefLetterModel:
             name_clean = re.sub(r"\W+", "_", data["name"])
             filename = Path(datetime.date.today().strftime(f"%Y-%m-%d-{name_clean}.docx"))
             doc = DocxTemplate("reference_template.docx")
-            doc.render(context)
+            try:
+                doc.render(context)
+            except docx.opc.exceptions.PackageNotFoundError:
+                return False
             doc.save(filename)
             pdf_name = str(filename.absolute().with_suffix(".pdf"))
-            word=comtypes.client.CreateObject("Word.Application")
-            word.Visible = 1
-            doc=word.Documents.Open(str(filename.absolute()))
-            doc.SaveAs(pdf_name,17)
-            doc.Close()
-            os.startfile(pdf_name)
-            
-
-
-# print(has_end)
-
-# date_text = datetime.date.today().strftime("%d %b %Y")
-# doc = DocxTemplate("reference_template.docx")
-# context = { 'ref_date':date_text,
-# 'start_year': "Sep %s"%start_year ,
-# 'has_end': has_end,
-# 'how_known': known,
-# 'end_year': "June %s"%end_year,
-# 'recommendation_text':recommendation,
-# 'student_name' : student_name}
-
-# doc.render(context)
-# filename = datetime.date.today().strftime(f"%Y-%m-%d-{student_name}.docx")
-
-# doc.save(filename)
+            if sys.platform=="win32":
+                import comtypes
+                import comtypes.client
+                word=comtypes.client.CreateObject("Word.Application")
+                word.Visible = 1
+                doc=word.Documents.Open(str(filename.absolute()))
+                doc.SaveAs(pdf_name,17)
+                doc.Close()
+                os.startfile(pdf_name)
+            else:
+                # TODO: other OS support for
+                # docx -> pdf conversion
+                os.startfile(filename)
+            return True
 
 
 class LetterList(Frame):
     def __init__(self, screen, model):
         super(LetterList, self).__init__(
             screen,
-            screen.height * 2 // 3,
-            screen.width * 2 // 3,
+            screen.height,
+            screen.width,
             on_load=self._reload_list,
             hover_focus=True,
             can_scroll=False,
@@ -235,6 +228,7 @@ class LetterList(Frame):
             on_change=self._on_pick,
             on_select=self._generate,
         )
+        self._generate_button = Button("Generate (Enter)", self._generate)
         self._copy_button = Button("Copy", self._copy)
         self._edit_button = Button("Edit", self._edit)
         self._delete_button = Button("Delete", self._delete)
@@ -242,13 +236,14 @@ class LetterList(Frame):
         self.add_layout(layout)
         layout.add_widget(self._list_view)
         layout.add_widget(Divider())
-        layout2 = Layout([1, 1, 1, 1, 1])
+        layout2 = Layout([1, 1, 1, 1, 1,1])
         self.add_layout(layout2)
         layout2.add_widget(Button("Add", self._add), 0)
         layout2.add_widget(self._copy_button, 1)
         layout2.add_widget(self._edit_button, 2)
         layout2.add_widget(self._delete_button, 3)
-        layout2.add_widget(Button("Quit", self._quit), 4)
+        layout2.add_widget(self._generate_button,4)
+        layout2.add_widget(Button("Quit", self._quit), 5)
         self.fix()
         self._on_pick()
 
@@ -274,7 +269,8 @@ class LetterList(Frame):
     def _generate(self):
         self.save()
         self._model.current_id = self.data["letters"]
-        self._model.write_docx()
+        if self._model.write_docx()==False:
+            self._scene.add_effect(PopUpDialog(self.screen,"Couldn't write docx file - is the template open and locked in word?",buttons=['OK']))
 
     def _edit(self):
         self.save()
@@ -366,36 +362,6 @@ class LetterView(Frame):
     @staticmethod
     def _cancel():
         raise NextScene("Main")
-
-
-# student_name=input("Name:")
-# known=input("Known in capability as:")
-# start_year=input("Start year:")
-# end_year=input("End year (or empty for still here):")
-# recommendation=input("Recommendation text (double enter to finish):")
-# while True:
-#     thisLine= input()
-#     recommendation+="\n"+thisLine
-#     if len(thisLine)==0:
-#         break
-
-# has_end = len(end_year.strip())!=0
-# print(has_end)
-
-# date_text = datetime.date.today().strftime("%d %b %Y")
-# doc = DocxTemplate("reference_template.docx")
-# context = { 'ref_date':date_text,
-# 'start_year': "Sep %s"%start_year ,
-# 'has_end': has_end,
-# 'how_known': known,
-# 'end_year': "June %s"%end_year,
-# 'recommendation_text':recommendation,
-# 'student_name' : student_name}
-
-# doc.render(context)
-# filename = datetime.date.today().strftime(f"%Y-%m-%d-{student_name}.docx")
-
-# doc.save(filename)
 
 
 custom_colour_theme = dict(asciimatics.widgets.utilities.THEMES["default"])

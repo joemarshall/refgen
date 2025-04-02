@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "refgen"
+version = "0.1.1"
+dependencies = [
+  "comtypes",
+  "docxtpl",
+]
+
+[project.scripts]
+refgen = "refgenerator:run"

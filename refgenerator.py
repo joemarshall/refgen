@@ -1,0 +1,426 @@
+from docxtpl import DocxTemplate
+import datetime
+import re
+import comtypes
+import comtypes.client
+from pathlib import Path
+import os
+
+import asciimatics
+from asciimatics.widgets import (
+    Frame,
+    ListBox,
+    Layout,
+    Divider,
+    Text,
+    Button,
+    TextBox,
+    Widget,
+    DatePicker,
+    DropdownList,
+    MultiColumnListBox,
+)
+from asciimatics.scene import Scene
+from asciimatics.screen import Screen
+from asciimatics.exceptions import ResizeScreenError, NextScene, StopApplication
+import sys
+import sqlite3
+
+# TODO:
+# 1) Shortcuts to commands on main screen
+# 2) Write letters out
+# 3) Convert to pdf? or just start in word?
+# 4) Make copy work (and update date)
+
+
+def adapt_date_iso(val):
+    """Adapt datetime.date to ISO 8601 date."""
+    return val.isoformat()
+
+
+def convert_date(val):
+    """Convert ISO 8601 date to datetime.date object."""
+    return datetime.date.fromisoformat(val.decode())
+
+
+sqlite3.register_adapter(datetime.date, adapt_date_iso)
+sqlite3.register_converter("date", convert_date)
+
+
+class RefLetterModel:
+    def __init__(self):
+        # Create a database in RAM.
+        self._db = sqlite3.connect(
+            "reference_list.sqlite3", detect_types=sqlite3.PARSE_DECLTYPES
+        )
+        self._db.row_factory = sqlite3.Row
+
+        # Create the basic refletter table.
+        self._db.cursor().execute(
+            """
+            CREATE TABLE if not exists refletters(
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                ref_date DATE,
+                start_year TEXT,
+                end_year TEXT,
+                target TEXT,
+                how_known TEXT,
+                recommendation TEXT)
+        """
+        )
+        self._db.commit()
+
+        # Current refletter when editing.
+        self.current_id = None
+
+    def add(self, refletter):
+        cursor = self._db.cursor()
+        cursor.execute(
+            """
+            INSERT INTO refletters(name, ref_date, start_year, end_year, how_known,recommendation)
+            VALUES(:name, :ref_date, :start_year, :end_year, :how_known, :recommendation)""",
+            refletter,
+        )
+        row_id = cursor.lastrowid
+        self._db.commit()
+        new_id = (
+            self._db.cursor()
+            .execute("SELECT id from refletters where rowid=?", [row_id])
+            .fetchone()["id"]
+        )
+        return new_id
+
+    def duplicate(self):
+        if self.current_id is not None:
+            data = dict(self.get_current_refletter())
+            del data["id"]
+            data["ref_date"] = datetime.date.today()
+            self.current_id = self.add(data)
+
+    def get_summary(self):
+        def str_not_none(s):
+            if s == None:
+                return ""
+            else:
+                return str(s)
+
+        summary_lines = (
+            self._db.cursor()
+            .execute(
+                "SELECT  ref_date,name,target,id from refletters order by ref_date desc"
+            )
+            .fetchall()
+        )
+        return [
+            ((str(d), str_not_none(n), str_not_none(t)), record_id)
+            for d, n, t, record_id in summary_lines
+        ]
+
+    def get_refletter(self, refletter_id):
+        return (
+            self._db.cursor()
+            .execute(
+                "SELECT id, * from refletters WHERE id=:id",
+                {"id": refletter_id},
+            )
+            .fetchone()
+        )
+
+    def get_current_refletter(self):
+        if self.current_id is None:
+            return {
+                "ref_date": datetime.date.today(),
+                "target": "",
+                "name": "",
+                "start_year": "",
+                "end_year": "",
+                "how_known": "",
+                "recommendation": "",
+            }
+        else:
+            return self.get_refletter(self.current_id)
+
+    def update_current_refletter(self, details):
+        if self.current_id is None:
+            self.add(details)
+        else:
+            columns = ",".join(["%s=:%s" % (col, col) for col in details.keys()])
+            self._db.cursor().execute(
+                f"""
+                UPDATE refletters SET {columns} WHERE id=:id""",
+                details,
+            )
+            self._db.commit()
+
+    def delete_refletter(self, refletter_id):
+        self._db.cursor().execute(
+            """
+            DELETE FROM refletters WHERE id=:id""",
+            {"id": refletter_id},
+        )
+        self._db.commit()
+
+    def write_docx(self):
+        if self.current_id is not None:
+            data = dict(self.get_current_refletter())
+            date_text = data["ref_date"].strftime("%d %b %Y")
+
+            data["has_end"] = len(data["end_year"].strip()) != 0
+            context = {
+                "ref_date": date_text,
+                "start_date": "Sep %s" % data["start_year"],
+                "has_end": data["has_end"],
+                "how_known": data["how_known"],
+                "end_date": "June %s" % data["end_year"],
+                "recommendation_text": data["recommendation"],
+                "student_name": data["name"],
+                "target": data["target"],
+            }
+            name_clean = re.sub(r"\W+", "_", data["name"])
+            filename = Path(datetime.date.today().strftime(f"%Y-%m-%d-{name_clean}.docx"))
+            doc = DocxTemplate("reference_template.docx")
+            doc.render(context)
+            doc.save(filename)
+            pdf_name = str(filename.absolute().with_suffix(".pdf"))
+            word=comtypes.client.CreateObject("Word.Application")
+            word.Visible = 1
+            doc=word.Documents.Open(str(filename.absolute()))
+            doc.SaveAs(pdf_name,17)
+            doc.Close()
+            os.startfile(pdf_name)
+            
+
+
+# print(has_end)
+
+# date_text = datetime.date.today().strftime("%d %b %Y")
+# doc = DocxTemplate("reference_template.docx")
+# context = { 'ref_date':date_text,
+# 'start_year': "Sep %s"%start_year ,
+# 'has_end': has_end,
+# 'how_known': known,
+# 'end_year': "June %s"%end_year,
+# 'recommendation_text':recommendation,
+# 'student_name' : student_name}
+
+# doc.render(context)
+# filename = datetime.date.today().strftime(f"%Y-%m-%d-{student_name}.docx")
+
+# doc.save(filename)
+
+
+class LetterList(Frame):
+    def __init__(self, screen, model):
+        super(LetterList, self).__init__(
+            screen,
+            screen.height * 2 // 3,
+            screen.width * 2 // 3,
+            on_load=self._reload_list,
+            hover_focus=True,
+            can_scroll=False,
+            title="List of references",
+        )
+        # Save off the model that accesses the contacts database.
+        self._model = model
+        self.palette = custom_colour_theme
+
+        # Create the form for displaying the list of contacts.
+        self._list_view = MultiColumnListBox(
+            Widget.FILL_FRAME,
+            columns=["<15%", "<40%", "<40%"],
+            options=model.get_summary(),
+            name="letters",
+            add_scroll_bar=True,
+            on_change=self._on_pick,
+            on_select=self._generate,
+        )
+        self._copy_button = Button("Copy", self._copy)
+        self._edit_button = Button("Edit", self._edit)
+        self._delete_button = Button("Delete", self._delete)
+        layout = Layout([100], fill_frame=True)
+        self.add_layout(layout)
+        layout.add_widget(self._list_view)
+        layout.add_widget(Divider())
+        layout2 = Layout([1, 1, 1, 1, 1])
+        self.add_layout(layout2)
+        layout2.add_widget(Button("Add", self._add), 0)
+        layout2.add_widget(self._copy_button, 1)
+        layout2.add_widget(self._edit_button, 2)
+        layout2.add_widget(self._delete_button, 3)
+        layout2.add_widget(Button("Quit", self._quit), 4)
+        self.fix()
+        self._on_pick()
+
+    def _on_pick(self):
+        self._edit_button.disabled = self._list_view.value is None
+        self._delete_button.disabled = self._list_view.value is None
+        self._copy_button.disabled = self._list_view.value is None
+
+    def _reload_list(self, new_value=None):
+        self._list_view.options = self._model.get_summary()
+        self._list_view.value = new_value
+
+    def _add(self):
+        self._model.current_id = None
+        raise NextScene("Edit Reference")
+
+    def _copy(self):
+        self.save()
+        self._model.current_id = self.data["letters"]
+        self._model.duplicate()
+        raise NextScene("Edit Reference")
+
+    def _generate(self):
+        self.save()
+        self._model.current_id = self.data["letters"]
+        self._model.write_docx()
+
+    def _edit(self):
+        self.save()
+        self._model.current_id = self.data["letters"]
+        raise NextScene("Edit Reference")
+
+    def _delete(self):
+        self.save()
+        self._model.delete_contact(self.data["letters"])
+        self._reload_list()
+
+    @staticmethod
+    def _quit():
+        raise StopApplication("User pressed quit")
+
+
+class LetterView(Frame):
+    def __init__(self, screen, model):
+        super(LetterView, self).__init__(
+            screen,
+            screen.height * 2 // 3,
+            screen.width * 2 // 3,
+            hover_focus=True,
+            can_scroll=False,
+            title="Reference Details",
+            reduce_cpu=True,
+        )
+        # Save off the model that accesses the contacts database.
+        self._model = model
+
+        # Create the form for displaying the list of contacts.
+        layout = Layout([100], fill_frame=True)
+        self.add_layout(layout)
+        layout.add_widget(Text("Name:", "name"))
+        layout.add_widget(DatePicker("Reference date:", "ref_date"))
+        year_range = range(
+            datetime.date.today().year - 10, datetime.date.today().year + 1
+        )
+        year_range = list(reversed(year_range))
+        layout.add_widget(
+            DropdownList(
+                options=[(str(x), x) for x in year_range],
+                label="Start year:",
+                name="start_year",
+            )
+        )
+        layout.add_widget(
+            DropdownList(
+                options=[("Still here", "")] + [(str(x), x) for x in year_range],
+                label="End year:",
+                name="end_year",
+            )
+        )
+        layout.add_widget(Text("Target course or university:", "target"))
+        layout.add_widget(Text("How known:", "how_known"))
+        layout.add_widget(
+            TextBox(
+                Widget.FILL_FRAME,
+                "Recommendation:",
+                "recommendation",
+                as_string=True,
+                line_wrap=True,
+            )
+        )
+        layout2 = Layout([1, 1, 1, 1])
+        self.add_layout(layout2)
+        layout2.add_widget(Button("OK", self._ok), 0)
+        layout2.add_widget(Button("Cancel", self._cancel), 3)
+        self.fix()
+
+    def reset(self):
+        # Do standard reset to clear out form, then populate with new data.
+        super(LetterView, self).reset()
+        self.data = self._model.get_current_refletter()
+
+    def _strip_full_stops(self, fields):
+        for f in fields:
+            self.data[f] = self.data[f].strip()
+            if self.data[f].endswith("."):
+                self.data[f] = self.data[f][:-1]
+
+    def _ok(self):
+        self.save()
+        self._strip_full_stops(["target", "how_known", "recommendation"])
+        print(self.data)
+        self._model.update_current_refletter(self.data)
+        raise NextScene("Main")
+
+    @staticmethod
+    def _cancel():
+        raise NextScene("Main")
+
+
+# student_name=input("Name:")
+# known=input("Known in capability as:")
+# start_year=input("Start year:")
+# end_year=input("End year (or empty for still here):")
+# recommendation=input("Recommendation text (double enter to finish):")
+# while True:
+#     thisLine= input()
+#     recommendation+="\n"+thisLine
+#     if len(thisLine)==0:
+#         break
+
+# has_end = len(end_year.strip())!=0
+# print(has_end)
+
+# date_text = datetime.date.today().strftime("%d %b %Y")
+# doc = DocxTemplate("reference_template.docx")
+# context = { 'ref_date':date_text,
+# 'start_year': "Sep %s"%start_year ,
+# 'has_end': has_end,
+# 'how_known': known,
+# 'end_year': "June %s"%end_year,
+# 'recommendation_text':recommendation,
+# 'student_name' : student_name}
+
+# doc.render(context)
+# filename = datetime.date.today().strftime(f"%Y-%m-%d-{student_name}.docx")
+
+# doc.save(filename)
+
+
+custom_colour_theme = dict(asciimatics.widgets.utilities.THEMES["default"])
+custom_colour_theme["selected_field"] = (
+    Screen.COLOUR_BLACK,
+    Screen.A_NORMAL,
+    Screen.COLOUR_CYAN,
+)
+
+
+def run_scenes(screen, scene,letters):
+    scenes = [
+        Scene([LetterList(screen, letters)], -1, name="Main"),
+        Scene([LetterView(screen, letters)], -1, name="Edit Reference"),
+    ]
+
+    screen.play(scenes, stop_on_resize=True, start_scene=scene, allow_int=True)
+
+
+def run():
+    letters = RefLetterModel()
+    last_scene = None
+    while True:
+        try:
+            Screen.wrapper(run_scenes, catch_interrupt=True, arguments=[last_scene,letters])
+            sys.exit(0)
+        except ResizeScreenError as e:
+            last_scene = e.scene

@@ -19,19 +19,31 @@ from asciimatics.widgets import (
     DatePicker,
     DropdownList,
     MultiColumnListBox,
-    PopUpDialog
+    PopUpDialog,
 )
+from asciimatics.event import KeyboardEvent
 from asciimatics.scene import Scene
 from asciimatics.screen import Screen
 from asciimatics.exceptions import ResizeScreenError, NextScene, StopApplication
 import sys
 import sqlite3
 
-# TODO:
-# 1) Shortcuts to commands on main screen
-# 2) Write letters out
-# 3) Convert to pdf? or just start in word?
-# 4) Make copy work (and update date)
+
+class EscapeFrame(Frame):
+    def process_event(self, event):
+        if isinstance(event, KeyboardEvent) and event.key_code == Screen.KEY_ESCAPE:
+            self.cancel()
+        else:
+            super().process_event(event)
+
+    def cancel(self):
+        # do nothing by default
+        pass
+
+
+class ValidationError(Exception):
+    def __init__(self, msg):
+        Exception.__init__(self, msg)
 
 
 def adapt_date_iso(val):
@@ -140,9 +152,35 @@ class RefLetterModel:
                 "recommendation": "",
             }
         else:
-            return self.get_refletter(self.current_id)
+            details = dict(self.get_refletter(self.current_id))
+            if details["end_year"] is None:
+                details["end_year"] = ""
+            if type(details["start_year"]) == str:
+                details["start_year"] = int(details["start_year"])
+
+            return details
+
+    def validate_refletter(self, details):
+        def check_val(details, val):
+            if val not in details:
+                return True
+            if details[val] is None:
+                return True
+            if len(str(details[val])) == 0:
+                return True
+            return False
+
+        if check_val(details, "start_year"):
+            raise ValidationError(f"Start year missing{details}")
+        elif check_val(details, "recommendation"):
+            raise ValidationError(
+                f"Missing recommendation:{details} {list(details.keys())}"
+            )
+        elif check_val(details, "how_known"):
+            raise ValidationError("Missing how you know them")
 
     def update_current_refletter(self, details):
+        self.validate_refletter(details)
         if self.current_id is None:
             self.add(details)
         else:
@@ -165,6 +203,7 @@ class RefLetterModel:
     def write_docx(self):
         if self.current_id is not None:
             data = dict(self.get_current_refletter())
+            self.validate_refletter(data)
             date_text = data["ref_date"].strftime("%d %b %Y")
 
             data["has_end"] = len(data["end_year"].strip()) != 0
@@ -179,7 +218,9 @@ class RefLetterModel:
                 "target": data["target"],
             }
             name_clean = re.sub(r"\W+", "_", data["name"])
-            filename = Path(datetime.date.today().strftime(f"%Y-%m-%d-{name_clean}.docx"))
+            filename = Path(
+                datetime.date.today().strftime(f"%Y-%m-%d-{name_clean}.docx")
+            )
             doc = DocxTemplate("reference_template.docx")
             try:
                 doc.render(context)
@@ -187,13 +228,14 @@ class RefLetterModel:
                 return False
             doc.save(filename)
             pdf_name = str(filename.absolute().with_suffix(".pdf"))
-            if sys.platform=="win32":
+            if sys.platform == "win32":
                 import comtypes
                 import comtypes.client
-                word=comtypes.client.CreateObject("Word.Application")
+
+                word = comtypes.client.CreateObject("Word.Application")
                 word.Visible = 1
-                doc=word.Documents.Open(str(filename.absolute()))
-                doc.SaveAs(pdf_name,17)
+                doc = word.Documents.Open(str(filename.absolute()))
+                doc.SaveAs(pdf_name, 17)
                 doc.Close()
                 os.startfile(pdf_name)
             else:
@@ -203,7 +245,7 @@ class RefLetterModel:
             return True
 
 
-class LetterList(Frame):
+class LetterList(EscapeFrame):
     def __init__(self, screen, model):
         super(LetterList, self).__init__(
             screen,
@@ -226,9 +268,9 @@ class LetterList(Frame):
             name="letters",
             add_scroll_bar=True,
             on_change=self._on_pick,
-            on_select=self._generate,
+            on_select=self._edit,
         )
-        self._generate_button = Button("Generate (Enter)", self._generate)
+        self._generate_button = Button("Generate (F5)", self._generate)
         self._copy_button = Button("Copy", self._copy)
         self._edit_button = Button("Edit", self._edit)
         self._delete_button = Button("Delete", self._delete)
@@ -236,13 +278,13 @@ class LetterList(Frame):
         self.add_layout(layout)
         layout.add_widget(self._list_view)
         layout.add_widget(Divider())
-        layout2 = Layout([1, 1, 1, 1, 1,1])
+        layout2 = Layout([1, 1, 1, 1, 1, 1])
         self.add_layout(layout2)
         layout2.add_widget(Button("Add", self._add), 0)
         layout2.add_widget(self._copy_button, 1)
         layout2.add_widget(self._edit_button, 2)
         layout2.add_widget(self._delete_button, 3)
-        layout2.add_widget(self._generate_button,4)
+        layout2.add_widget(self._generate_button, 4)
         layout2.add_widget(Button("Quit", self._quit), 5)
         self.fix()
         self._on_pick()
@@ -255,6 +297,17 @@ class LetterList(Frame):
     def _reload_list(self, new_value=None):
         self._list_view.options = self._model.get_summary()
         self._list_view.value = new_value
+
+    def reset(self):
+        super(LetterList, self).reset()
+        if self._model.current_id is not None:
+            self._list_view.value = self._model.current_id
+
+    def process_event(self, event):
+        if isinstance(event, KeyboardEvent) and event.key_code == Screen.KEY_F5:
+            self._generate()
+        else:
+            super().process_event(event)
 
     def _add(self):
         self._model.current_id = None
@@ -269,8 +322,14 @@ class LetterList(Frame):
     def _generate(self):
         self.save()
         self._model.current_id = self.data["letters"]
-        if self._model.write_docx()==False:
-            self._scene.add_effect(PopUpDialog(self.screen,"Couldn't write docx file - is the template open and locked in word?",buttons=['OK']))
+        if self._model.write_docx() == False:
+            self._scene.add_effect(
+                PopUpDialog(
+                    self.screen,
+                    "Couldn't write docx file - is the template open and locked in word?",
+                    buttons=["OK"],
+                )
+            )
 
     def _edit(self):
         self.save()
@@ -282,12 +341,15 @@ class LetterList(Frame):
         self._model.delete_contact(self.data["letters"])
         self._reload_list()
 
+    def cancel(self):
+        self._quit()
+
     @staticmethod
     def _quit():
         raise StopApplication("User pressed quit")
 
 
-class LetterView(Frame):
+class LetterView(EscapeFrame):
     def __init__(self, screen, model):
         super(LetterView, self).__init__(
             screen,
@@ -338,7 +400,7 @@ class LetterView(Frame):
         layout2 = Layout([1, 1, 1, 1])
         self.add_layout(layout2)
         layout2.add_widget(Button("OK", self._ok), 0)
-        layout2.add_widget(Button("Cancel", self._cancel), 3)
+        layout2.add_widget(Button("Cancel", self.cancel), 3)
         self.fix()
 
     def reset(self):
@@ -355,13 +417,33 @@ class LetterView(Frame):
     def _ok(self):
         self.save()
         self._strip_full_stops(["target", "how_known", "recommendation"])
-        print(self.data)
-        self._model.update_current_refletter(self.data)
-        raise NextScene("Main")
+        try:
+            self._model.update_current_refletter(self.data)
+            raise NextScene("Main")
+        except ValidationError as e:
+            message = e.args[0]
+            self._scene.add_effect(
+                PopUpDialog(self.screen, f"{message}: please fix", buttons=["OK"])
+            )
+            raise e
 
-    @staticmethod
-    def _cancel():
-        raise NextScene("Main")
+    def is_dirty(self):
+        self.save()
+        return (self._model.get_current_refletter()!=self.data)
+
+    def cancel(self):
+        if self.is_dirty():
+            def quit_if_1(v):
+                if v==1:
+                    raise NextScene("Main")
+            self._scene.add_effect(
+                PopUpDialog(
+                    self.screen,
+                    "You've made changes, dump them?",
+                    buttons=["Cancel","OK"],on_close=quit_if_1
+                ))
+        else:
+            raise NextScene("Main")
 
 
 custom_colour_theme = dict(asciimatics.widgets.utilities.THEMES["default"])
@@ -372,7 +454,7 @@ custom_colour_theme["selected_field"] = (
 )
 
 
-def run_scenes(screen, scene,letters):
+def run_scenes(screen, scene, letters):
     scenes = [
         Scene([LetterList(screen, letters)], -1, name="Main"),
         Scene([LetterView(screen, letters)], -1, name="Edit Reference"),
@@ -386,7 +468,9 @@ def run():
     last_scene = None
     while True:
         try:
-            Screen.wrapper(run_scenes, catch_interrupt=True, arguments=[last_scene,letters])
+            Screen.wrapper(
+                run_scenes, catch_interrupt=True, arguments=[last_scene, letters]
+            )
             sys.exit(0)
         except ResizeScreenError as e:
             last_scene = e.scene
